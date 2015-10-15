@@ -1,0 +1,265 @@
+#ifdef HOST
+#include <malloc.h>
+#include <stdlib.h>
+#include <assert.h>
+#include <string.h>
+#include <math.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <limits.h>
+#else
+typedef uchar uint8_t;
+typedef ushort uint16_t;
+#endif
+
+typedef float real;
+#define BRAIN_RECURRENT 1
+
+typedef struct {
+  real **outputs;
+  real ***network;
+  uint16_t *def;
+  size_t offset;
+  uint8_t flags;
+  uint16_t def_len;
+  uint8_t padding[3];
+} brain;
+
+
+
+size_t bGetBytesFromDef(uint16_t *def, uint16_t def_len, uint8_t flags);
+size_t bGetSynFromDef(uint16_t *def, uint16_t def_len, uint8_t flags);
+brain *bCreateFromDef(uint8_t *memory, uint16_t *def, uint16_t def_len,
+    uint8_t flags);
+brain *bCreateFromParents(uint8_t *memory, brain *dad, brain *mom,
+    real mutation_rate);
+real *bOutputs(brain *b);
+
+
+#ifdef HOST
+
+// Fast rand functions
+unsigned int g_seed;
+
+inline void fast_srand( int seed ) {
+  g_seed = seed;
+}
+
+inline uint16_t fastrand() {
+  g_seed = (214013*g_seed+2531011);
+  return (g_seed>>16)&0x7FFF;
+}
+
+size_t bAlloc = 0;
+inline void *bMalloc(size_t n, size_t size) {
+  void *mem_pointer = malloc(n*size);
+  assert(mem_pointer);
+  //bAlloc+= n*size;
+  return mem_pointer;
+}
+
+inline real bWeight(real factor) {
+  return (real)(4*((real)(fastrand()%0xFFFF)/(real)0xFFFF-.25F)*factor);
+}
+
+
+size_t bGetBytesFromDef(uint16_t *def, uint16_t def_len, uint8_t flags) {
+  /*
+  size_t bytes = 0;
+  bytes+= sizeof(brain);
+  bytes+= def_len*sizeof(uint16_t);
+  bytes+= (def_len-1)*sizeof(real **);
+  bytes+= (def_len-1)*sizeof(real *);
+  for (int i = 0; i < def_len-1; i++) {
+    bytes+= (def[i+1])*sizeof(real *);
+    bytes+= (def[i+1])*sizeof(real);
+
+    int syn = def[i]+1; // Default synapses = prec. neurons and bias
+    if (flags & BRAIN_RECURRENT && i < def_len-2)
+      syn+= def[i+2]; // Recurrent synapses
+
+    bytes+= def[i+1]*syn*sizeof(real);
+  }
+  return bytes;
+*/
+
+  size_t bytes = 0;
+
+  bytes+= 1*sizeof(brain);
+  bytes+= def_len*sizeof(uint16_t);
+  bytes+= (def_len-1)*sizeof(real **);
+  bytes+= (def_len-1)*sizeof(real *);
+
+  for (int i = 0; i < def_len-1; i++) {
+    bytes+= ((def[i+1])*sizeof(real *));
+    bytes+= ((def[i+1])*sizeof(real));
+
+    int syn = def[i]+1; // Default synapses = prec. neurons and bias
+    if (flags & BRAIN_RECURRENT && i < def_len-2)
+      syn+= def[i+2]; // Recurrent synapses
+    bytes+= def[i+1]*(syn*sizeof(real));
+  }
+  return bytes;
+}
+
+size_t bGetSynFromDef(uint16_t *def, uint16_t def_len, uint8_t flags) {
+  size_t syn = 0;
+  for (int i = 0; i < def_len-1; i++) {
+    int syn = def[i]+1; // Default synapses = prec. neurons and bias
+    if (flags & BRAIN_RECURRENT && i < def_len-2)
+      syn+= def[i+2]; // Recurrent synapses
+
+    syn+= def[i+1]*syn;
+  }
+  return syn;
+}
+
+
+brain *bCreateFromDef(uint8_t *memory, uint16_t *def, uint16_t def_len,
+    uint8_t flags) {
+  size_t offset = (size_t)memory;
+
+  brain *b = (brain *)(memory);
+  offset+= 1*sizeof(brain);
+
+  b->offset = (size_t)memory;
+  b->flags = flags;
+  b->def_len = def_len;
+
+  b->def = (uint16_t *)(offset);
+  offset+= b->def_len*sizeof(uint16_t);
+
+  memcpy(b->def, def, b->def_len*sizeof(uint16_t));
+  b->network = (real ***)offset;
+  offset+= (b->def_len-1)*sizeof(real **);
+  b->outputs = (real **)offset;
+  offset+= (b->def_len-1)*sizeof(real *);
+
+  for (int i = 0; i < b->def_len-1; i++) {
+    b->network[i] = (real **)offset;
+    offset+= ((def[i+1])*sizeof(real *));
+    b->outputs[i] = (real *) offset;
+    offset+= ((def[i+1])*sizeof(real));
+
+    int syn = b->def[i]+1; // Default synapses = prec. neurons and bias
+    if (b->flags & BRAIN_RECURRENT && i < b->def_len-2)
+      syn+= b->def[i+2]; // Recurrent synapses
+
+    for (int j = 0; j < b->def[i+1]; j++) {
+      b->network[i][j] = (real *)offset;
+      offset+= (syn*sizeof(real));
+      b->outputs[i][j] = 0;
+      for (int k = 0; k < syn; k++) {
+        b->network[i][j][k] = bWeight(1);
+      }
+    }
+  }
+  return b;
+}
+
+brain *bCreateFromParents(uint8_t *memory, brain *dad, brain *mom,
+    real mutation_rate) {
+  brain *b = bCreateFromDef(memory, dad->def, dad->def_len, dad->flags);
+
+
+  for (int i = 0; i < b->def_len-1; i++) {
+    int syn = b->def[i]+1; // Default synapses = prec. neurons and bias
+    if (b->flags & BRAIN_RECURRENT && i < b->def_len-2)
+      syn+= b->def[i+2]; // Recurrent synapses
+    for (int j = 0; j < b->def[i+1]; j++) {
+      real *syn_src = rand()%2 ? dad->network[i][j]
+          : mom->network[i][j];
+      for (int k = 0; k < syn; k++) {
+        b->network[i][j][k] = syn_src[k];
+      }
+    }
+  }
+  return b;
+}
+
+
+#endif
+
+// KERNEL FUNCTIONS
+
+inline real bActivate(real x) {
+
+  if(x > 40)
+    return 1;
+  if(x < -40)
+    return -1;
+
+  return 1/(1 + exp(-x));
+}
+
+
+real *bOutputs(brain *b) {
+  return b->outputs[b->def_len-2];
+}
+
+#ifdef HOST
+inline void bSetup(brain *b) {
+#else
+inline void bSetup(global brain *b) {
+#endif
+  size_t offset = (size_t)b-b->offset;
+  b->offset = (size_t)b;
+  b->def+= offset;
+  b->network+= offset;
+  b->outputs+= offset;
+  for (int i = 0; i < b->def_len-1; i++) {
+    b->network[i]+= offset;
+    b->outputs[i]+= offset;
+
+    //for (int j = 0; j < b->def[i+1]; j++) {
+      //b->network[i][j]+= offset;
+    //}
+  }
+}
+
+
+inline void bProcess(brain *b, real *input) {
+
+  int input_len = b->def[0];
+
+  // i -> len(net)
+  for (int i = 0; i < b->def_len-1; i++) {
+    // Output become new input
+    if (i > 0) {
+      input = &b->outputs[i-1][0];
+      input_len = b->def[i+1];
+    }
+
+    // j -> len(net[i])
+    for (int j = 0; j < b->def[i+1]; j++) {
+      b->outputs[i][j] = 0;
+
+      for (int k = 0; k < input_len; k++) {
+        b->outputs[i][j]+= input[k] * b->network[i][j][k];
+      }
+
+      // Add the bias
+      b->outputs[i][j]+= 1 * b->network[i][j][input_len];
+
+      // k -> len(out[i+1])
+      for (int k = 0; i<b->def_len-2 && b->flags&BRAIN_RECURRENT
+          && k < b->def[i+2]; k++) {
+        b->outputs[i][j] = b->outputs[i+1][j]
+            * b->network[i][j][input_len+1+k];
+      }
+
+      b->outputs[i][j] = bActivate(b->outputs[i][j]);
+    }
+  }
+}
+
+#ifdef HOST
+inline brain *bGet(uint8_t *memory, size_t size, size_t offset) {
+  brain *b = (brain *)(memory+size*offset);
+#else
+global inline brain *bGet(global uint8_t *memory, size_t size, size_t offset) {
+  global brain *b = memory+size*offset;
+#endif
+  bSetup(b);
+  return b;
+}
